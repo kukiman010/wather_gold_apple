@@ -11,13 +11,12 @@ from aiogram.types import CallbackQuery, Message
 
 import db_async as database
 from bot.keyboards import delete_keyboard, product_list_keyboard
-from parser import normalize_goldapple_url, parser
+from parser import extract_goldapple_url, normalize_goldapple_url, parser
 from scheduler import format_price
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-URL_RE = re.compile(r"https?://(?:www\.)?goldapple\.ru/\d+", re.IGNORECASE)
 PRICE_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*$")
 
 
@@ -135,13 +134,11 @@ async def process_target_price(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(F.text.regexp(URL_RE))
+@router.message(F.text.contains("goldapple.ru"))
 async def process_product_url(message: Message, state: FSMContext) -> None:
-    match = URL_RE.search(message.text or "")
-    if not match:
+    url = extract_goldapple_url(message.text or "")
+    if not url:
         return
-
-    url = match.group(0)
     wait_message = await message.answer("Проверяю товар, подождите…")
 
     try:

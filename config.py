@@ -17,4 +17,4 @@ DB_NAME = os.getenv("DB_NAME", "tg_gold_apple")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
-GOLDAPPLE_URL_PATTERN = r"https?://(?:www\.)?goldapple\.ru/\d+"
+GOLDAPPLE_URL_PATTERN = r"https?://(?:www\.)?goldapple\.ru/\S+"

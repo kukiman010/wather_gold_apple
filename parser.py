@@ -11,6 +11,10 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from config import CITY_ID
 
 ITEM_ID_RE = re.compile(r"goldapple\.ru/(\d+)", re.IGNORECASE)
+GOLDAPPLE_URL_RE = re.compile(
+    r"https?://(?:www\.)?goldapple\.ru/\S+",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -27,6 +31,12 @@ class ProductInfo:
 def extract_item_id(url: str) -> Optional[str]:
     match = ITEM_ID_RE.search(url)
     return match.group(1) if match else None
+
+
+def extract_goldapple_url(text: str) -> Optional[str]:
+    """Извлекает ссылку на товар из текста (в т.ч. «название + ссылка» при шаринге)."""
+    match = GOLDAPPLE_URL_RE.search(text)
+    return match.group(0).rstrip(".,;!?") if match else None
 
 
 def normalize_goldapple_url(url: str) -> str:
