@@ -156,9 +156,21 @@ async def process_product_url(message: Message, state: FSMContext) -> None:
         return
 
     existing = await database.get_user_products(message.from_user.id)
-    if any(item.item_id == info.item_id for item in existing):
+    existing_product = next(
+        (item for item in existing if item.item_id == info.item_id),
+        None,
+    )
+    if existing_product:
+        await database.add_product(
+            user_id=message.from_user.id,
+            url=info.url,
+            item_id=info.item_id,
+            name=info.name,
+            target_price=existing_product.target_price,
+            current_price=info.price,
+        )
         await wait_message.edit_text(
-            f"Этот товар уже в списке.\n\n"
+            f"Этот товар уже в списке — ссылка и цена обновлены.\n\n"
             f"<b>{info.name}</b>\n"
             f"{_price_hint(info)}\n"
             f"<a href=\"{info.url}\">Открыть товар</a>",
