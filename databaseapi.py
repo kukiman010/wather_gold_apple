@@ -173,24 +173,27 @@ class dbApi:
         last_notified_price: Optional[float] = None,
         *,
         update_notified: bool = False,
+        url: Optional[str] = None,
     ) -> None:
         if update_notified:
             self.db.execute_query(
                 """
                 UPDATE products
-                SET current_price = %s, last_notified_price = %s
+                SET current_price = %s,
+                    last_notified_price = %s,
+                    url = COALESCE(%s, url)
                 WHERE id = %s
                 """,
-                (current_price, last_notified_price, product_id),
+                (current_price, last_notified_price, url, product_id),
             )
         else:
             self.db.execute_query(
                 """
                 UPDATE products
-                SET current_price = %s
+                SET current_price = %s, url = COALESCE(%s, url)
                 WHERE id = %s
                 """,
-                (current_price, product_id),
+                (current_price, url, product_id),
             )
 
     def close(self) -> None:

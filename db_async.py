@@ -72,6 +72,7 @@ async def update_product_price(
     last_notified_price: Optional[float] = None,
     *,
     update_notified: bool = False,
+    url: Optional[str] = None,
 ) -> None:
     await asyncio.to_thread(
         get_db_api().update_product_price,
@@ -79,4 +80,5 @@ async def update_product_price(
         current_price,
         last_notified_price,
         update_notified=update_notified,
+        url=url,
     )

@@ -34,7 +34,9 @@ async def check_prices(bot: Bot, gold_parser: Optional[GoldAppleParser] = None) 
 
     for product in products:
         try:
-            info = await active_parser.get_product(product.url)
+            info = await active_parser.get_product_by_item_id(
+                product.item_id, product.url
+            )
             current_price = info.price
 
             should_notify = (
@@ -54,7 +56,7 @@ async def check_prices(bot: Bot, gold_parser: Optional[GoldAppleParser] = None) 
                 )
                 if info.old_price and info.old_price > current_price:
                     text += f"Старая цена: {format_price(info.old_price)}\n"
-                text += f"\n<a href=\"{product.url}\">Открыть товар</a>"
+                text += f"\n<a href=\"{info.url}\">Открыть товар</a>"
                 text += UNSUBSCRIBE_HINT
 
                 await bot.send_message(product.user_id, text, disable_web_page_preview=False)
@@ -63,6 +65,7 @@ async def check_prices(bot: Bot, gold_parser: Optional[GoldAppleParser] = None) 
                     current_price,
                     last_notified_price=current_price,
                     update_notified=True,
+                    url=info.url,
                 )
                 logger.info(
                     "Уведомление отправлено: user=%s item=%s price=%s",
@@ -71,7 +74,9 @@ async def check_prices(bot: Bot, gold_parser: Optional[GoldAppleParser] = None) 
                     current_price,
                 )
             else:
-                await database.update_product_price(product.id, current_price)
+                await database.update_product_price(
+                    product.id, current_price, url=info.url
+                )
         except Exception:
             logger.exception(
                 "Ошибка проверки товара id=%s url=%s", product.id, product.url

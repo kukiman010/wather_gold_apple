@@ -41,13 +41,30 @@ def extract_goldapple_url(text: str) -> Optional[str]:
 
 def normalize_goldapple_url(url: str) -> str:
     parsed = urlparse(url.strip())
-    if "goldapple.ru" not in parsed.netloc.lower():
+    hostname = (parsed.hostname or "").lower()
+    if hostname != "goldapple.ru" and not hostname.endswith(".goldapple.ru"):
         raise ValueError("Ссылка должна вести на goldapple.ru")
     item_id = extract_item_id(url)
     if not item_id:
         raise ValueError("Не удалось найти ID товара в ссылке")
     path = parsed.path.rstrip("/") or f"/{item_id}"
     return f"https://goldapple.ru{path}"
+
+
+def _choose_canonical_url(item_id: str, *candidates: Optional[str]) -> str:
+    """Возвращает первый безопасный URL, который ведёт на нужный товар."""
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate.startswith("/"):
+            candidate = f"https://goldapple.ru{candidate}"
+        try:
+            normalized = normalize_goldapple_url(candidate)
+        except ValueError:
+            continue
+        if extract_item_id(normalized) == item_id:
+            return normalized
+    return f"https://goldapple.ru/{item_id}"
 
 
 def _money_value(block: Optional[dict]) -> Optional[float]:
@@ -183,16 +200,24 @@ class GoldAppleParser:
         raise RuntimeError(f"Не удалось получить данные товара: {last_error}")
 
     async def get_product(self, url: str) -> ProductInfo:
-        async with self._lock:
-            normalized_url = normalize_goldapple_url(url)
-            item_id = extract_item_id(normalized_url)
-            if not item_id:
-                raise ValueError("Некорректная ссылка на товар")
+        normalized_url = normalize_goldapple_url(url)
+        item_id = extract_item_id(normalized_url)
+        if not item_id:
+            raise ValueError("Некорректная ссылка на товар")
+        return await self.get_product_by_item_id(item_id, normalized_url)
 
+    async def get_product_by_item_id(
+        self, item_id: str, url: Optional[str] = None
+    ) -> ProductInfo:
+        if not item_id.isdigit():
+            raise ValueError("Некорректный ID товара")
+
+        navigation_url = _choose_canonical_url(item_id, url)
+        async with self._lock:
             await self._ensure_session()
             assert self._page is not None
 
-            await self._page.goto(normalized_url, wait_until="load", timeout=90_000)
+            await self._page.goto(navigation_url, wait_until="load", timeout=90_000)
             for _ in range(20):
                 title = (await self._page.title()).lower()
                 if "checking device" not in title:
@@ -200,6 +225,14 @@ class GoldAppleParser:
                 await self._page.wait_for_timeout(2_000)
 
             await self._page.wait_for_timeout(1_500)
+            canonical_href = await self._page.evaluate(
+                """
+                () => {
+                    const element = document.querySelector('link[rel="canonical"]');
+                    return element ? element.href : null;
+                }
+                """
+            )
             payload = await self._fetch_from_api(item_id)
             data = payload.get("data") or {}
             variants = data.get("variants") or []
@@ -209,6 +242,14 @@ class GoldAppleParser:
             variant = next(
                 (v for v in variants if v.get("itemId") == item_id),
                 variants[0],
+            )
+            canonical_url = _choose_canonical_url(
+                item_id,
+                variant.get("url"),
+                data.get("url"),
+                canonical_href,
+                self._page.url,
+                navigation_url,
             )
             price_block = variant.get("price")
             if not price_block:
@@ -223,7 +264,7 @@ class GoldAppleParser:
                 item_id=item_id,
                 name=full_name,
                 brand=brand,
-                url=normalized_url,
+                url=canonical_url,
                 price=current_price,
                 old_price=old_price,
                 has_discount=has_discount,
