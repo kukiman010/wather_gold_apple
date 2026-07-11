@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
@@ -15,6 +16,13 @@ GOLDAPPLE_URL_RE = re.compile(
     r"https?://(?:www\.)?goldapple\.ru/\S+",
     re.IGNORECASE,
 )
+API_BLOCK_COOLDOWN_SECONDS = 15 * 60
+
+
+class ApiResponseError(RuntimeError):
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(f"API status {status}")
 
 
 @dataclass
@@ -115,6 +123,7 @@ class GoldAppleParser:
         self._page: Optional[Page] = None
         self._lock = asyncio.Lock()
         self._session_ready = False
+        self._api_blocked_until = 0.0
 
     async def start(self) -> None:
         if self._browser:
@@ -131,17 +140,26 @@ class GoldAppleParser:
         self._page = await self._context.new_page()
 
     async def stop(self) -> None:
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
+        context = self._context
+        browser = self._browser
+        playwright = self._playwright
         self._browser = None
         self._context = None
         self._page = None
         self._playwright = None
         self._session_ready = False
+
+        for resource in (context, browser, playwright):
+            if resource is None:
+                continue
+            try:
+                if resource is playwright:
+                    await resource.stop()
+                else:
+                    await resource.close()
+            except Exception:
+                # Ресурс уже мог закрыться при остановке драйвера или процесса.
+                pass
 
     async def _ensure_session(self) -> None:
         if not self._page:
@@ -161,13 +179,28 @@ class GoldAppleParser:
 
         raise RuntimeError("Не удалось пройти проверку сайта Gold Apple")
 
-    async def _fetch_from_api(self, item_id: str, retries: int = 3) -> dict:
+    async def _renew_session(self, navigation_url: str) -> None:
+        await self.stop()
+        await self.start()
+        await self._ensure_session()
+        assert self._page is not None
+        await self._page.goto(navigation_url, wait_until="load", timeout=90_000)
+        for _ in range(20):
+            title = (await self._page.title()).lower()
+            if "checking device" not in title:
+                return
+            await self._page.wait_for_timeout(2_000)
+        raise RuntimeError("Не удалось обновить сессию Gold Apple")
+
+    async def _fetch_from_api(
+        self, item_id: str, navigation_url: str, retries: int = 3
+    ) -> dict:
         assert self._page is not None
         last_error: Exception | None = None
 
         for attempt in range(retries):
             try:
-                return await self._page.evaluate(
+                result = await self._page.evaluate(
                     """
                     async ({ itemId, cityId }) => {
                         const apiUrl =
@@ -179,13 +212,32 @@ class GoldAppleParser:
                             headers: { Accept: "application/json" },
                         });
                         if (!response.ok) {
-                            throw new Error("API status " + response.status);
+                            return { ok: false, status: response.status };
                         }
-                        return await response.json();
+                        return { ok: true, payload: await response.json() };
                     }
                     """,
                     {"itemId": item_id, "cityId": CITY_ID},
                 )
+                if result.get("ok"):
+                    return result["payload"]
+
+                status = int(result.get("status") or 0)
+                last_error = ApiResponseError(status)
+                if attempt < retries - 1:
+                    if status in (401, 403):
+                        if attempt > 0:
+                            self._api_blocked_until = (
+                                time.monotonic() + API_BLOCK_COOLDOWN_SECONDS
+                            )
+                            raise last_error
+                        await self._renew_session(navigation_url)
+                    else:
+                        await self._page.wait_for_timeout(2_000)
+                        await self._page.reload(wait_until="load", timeout=90_000)
+                continue
+            except ApiResponseError:
+                raise
             except Exception as exc:
                 last_error = exc
                 if attempt < retries - 1:
@@ -197,7 +249,44 @@ class GoldAppleParser:
                             break
                         await self._page.wait_for_timeout(2_000)
 
+        if isinstance(last_error, ApiResponseError):
+            raise last_error
         raise RuntimeError(f"Не удалось получить данные товара: {last_error}")
+
+    async def _get_product_from_page(
+        self, item_id: str, navigation_url: str
+    ) -> ProductInfo:
+        assert self._page is not None
+        price_locator = self._page.locator(
+            '[data-test-id="price"] meta[itemprop="price"][content]'
+        ).first
+        if await price_locator.count() == 0:
+            raise ValueError("Цена не найдена на странице товара")
+
+        price_value = await price_locator.get_attribute("content")
+        if not price_value:
+            raise ValueError("Цена не найдена на странице товара")
+
+        name_locator = self._page.locator("h1").first
+        name = (
+            (await name_locator.inner_text()).strip()
+            if await name_locator.count()
+            else item_id
+        )
+        canonical_url = _choose_canonical_url(
+            item_id,
+            self._page.url,
+            navigation_url,
+        )
+        return ProductInfo(
+            item_id=item_id,
+            name=name,
+            brand="",
+            url=canonical_url,
+            price=float(price_value.replace(",", ".")),
+            old_price=None,
+            has_discount=False,
+        )
 
     async def get_product(self, url: str) -> ProductInfo:
         normalized_url = normalize_goldapple_url(url)
@@ -233,7 +322,25 @@ class GoldAppleParser:
                 }
                 """
             )
-            payload = await self._fetch_from_api(item_id)
+            if time.monotonic() < self._api_blocked_until:
+                try:
+                    return await self._get_product_from_page(
+                        item_id, navigation_url
+                    )
+                except ValueError:
+                    pass
+
+            try:
+                payload = await self._fetch_from_api(item_id, navigation_url)
+            except ApiResponseError as exc:
+                if exc.status not in (401, 403):
+                    raise
+                try:
+                    return await self._get_product_from_page(
+                        item_id, navigation_url
+                    )
+                except ValueError:
+                    raise exc
             data = payload.get("data") or {}
             variants = data.get("variants") or []
             if not variants:

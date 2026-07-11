@@ -6,7 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from databaseapi import Product
-from parser import ProductInfo, _choose_canonical_url, normalize_goldapple_url
+from parser import (
+    GoldAppleParser,
+    ProductInfo,
+    _choose_canonical_url,
+    normalize_goldapple_url,
+)
 
 try:
     import aiogram  # noqa: F401
@@ -43,6 +48,33 @@ class CanonicalUrlTests(unittest.TestCase):
             normalize_goldapple_url(
                 "https://notgoldapple.ru/99000117702-myhome-irn-004"
             )
+
+
+class ParserRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_renews_session_after_api_403(self) -> None:
+        payload = {"data": {"itemId": "99000117702"}}
+        page = SimpleNamespace(
+            evaluate=AsyncMock(
+                side_effect=[
+                    {"ok": False, "status": 403},
+                    {"ok": True, "payload": payload},
+                ]
+            )
+        )
+        gold_parser = GoldAppleParser()
+        gold_parser._page = page
+        gold_parser._renew_session = AsyncMock()
+
+        result = await gold_parser._fetch_from_api(
+            "99000117702",
+            "https://goldapple.ru/99000117702-myhome-irn-004",
+        )
+
+        self.assertEqual(result, payload)
+        gold_parser._renew_session.assert_awaited_once_with(
+            "https://goldapple.ru/99000117702-myhome-irn-004"
+        )
+        self.assertEqual(page.evaluate.await_count, 2)
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):

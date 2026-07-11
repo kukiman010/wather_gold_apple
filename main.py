@@ -44,6 +44,10 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         checker_task.cancel()
+        try:
+            await checker_task
+        except asyncio.CancelledError:
+            pass
         await parser.stop()
         close_db_api()
         await bot.session.close()
